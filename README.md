@@ -27,7 +27,7 @@ A Spring Boot application that simulates an NCR ATM terminal communicating with 
 
 The server starts on **http://localhost:8080**.
 
-By default, `atm.host.simulated=true` in `application.properties`, so no real NCR host is needed. To connect to a real host, set `atm.host.simulated=false` and configure `atm.host.address` and `atm.host.port`.
+By default, `atm.host.simulated=true` in `application.properties`, so no real NCR host is needed. To connect to a real host, see [Connecting to a Real NCR ATM Host](#connecting-to-a-real-ncr-atm-host) below.
 
 ---
 
@@ -121,10 +121,10 @@ Content-Type: application/json
     },
     {
       "messageClass": "UNSOLICITED",
-      "messageSubClass": "E",
+      "messageSubClass": "T",
       "direction": "TERMINAL->HOST",
-      "rawMessage": "1\u001cE\u001c00000001\u001c0001\u001c001\u001d041225EEEEEEEEEE\u001d1\u001d000000010000",
-      "readableMessage": "1<FS>E<FS>00000001<FS>0001<FS>001<GS>041225EEEEEEEEEE<GS>1<GS>000000010000",
+      "rawMessage": "1\u001cT\u001c00000001\u001c0001\u001d020000\u001d000000010000\u001d10\u001d4111111111111111\u001d041225EEEEEEEEEE",
+      "readableMessage": "1<FS>T<FS>00000001<FS>0001<GS>020000<GS>000000010000<GS>10<GS>4111111111111111<GS>041225EEEEEEEEEE",
       "timestamp": "2026-03-08T02:16:54.291Z"
     },
     {
@@ -165,14 +165,30 @@ Every response includes an `ndcTrace` array showing the full NDC protocol exchan
 
 The 6-message exchange for a withdrawal:
 
-| # | Direction | Class | Description |
-|---|---|---|---|
-| 1 | TERMINAL→HOST | SOLICITED | Terminal Solicited Ready |
-| 2 | HOST→TERMINAL | SOLICITED | Host Ready Acknowledgement |
-| 3 | TERMINAL→HOST | UNSOLICITED | Card Data (Track 2) |
-| 4 | HOST→TERMINAL | HOST_COMMAND | Enter PIN command (state 024) |
-| 5 | TERMINAL→HOST | UNSOLICITED | Transaction Request (PIN block + amount) |
-| 6 | HOST→TERMINAL | HOST_DATA | Authorization Response |
+| # | Direction | Class | Sub-class | Description |
+|---|---|---|---|---|
+| 1 | TERMINAL→HOST | SOLICITED | F | Terminal Solicited Ready |
+| 2 | HOST→TERMINAL | SOLICITED | F | Host Ready Acknowledgement |
+| 3 | TERMINAL→HOST | UNSOLICITED | E | Card Data (Track 2) |
+| 4 | HOST→TERMINAL | HOST_COMMAND | 8 | Enter PIN command (state 024) |
+| 5 | TERMINAL→HOST | UNSOLICITED | **T** | Transaction Request (txnCode + amount + accountType + PAN + PIN block) |
+| 6 | HOST→TERMINAL | HOST_DATA | A | Authorization Response |
+
+### Transaction Request (message #5) field breakdown
+
+```
+1<FS>T<FS>00000001<FS>0001<GS>020000<GS>000000010000<GS>10<GS>4111111111111111<GS>041225EEEEEEEEEE
+│    │   │         │        │         │              │    │                    │
+│    │   │         │        │         │              │    │                    └─ PIN block (ISO 9564 Format 0)
+│    │   │         │        │         │              │    └─ PAN (card number)
+│    │   │         │        │         │              └─ Account type (10 = CHECKING/none)
+│    │   │         │        │         └─ Amount in cents, 12 digits ($100.00 = 000000010000)
+│    │   │         │        └─ Transaction code (02=withdrawal, 0000=flags)
+│    │   │         └─ Institution ID
+│    │   └─ Terminal ID
+│    └─ Sub-class T = Transaction Request
+└─ Class 1 = UNSOLICITED
+```
 
 ---
 
@@ -202,6 +218,88 @@ When `atm.host.simulated=true`, the built-in `SimulatedHostGateway` is used:
 |---|---|
 | ≤ $500.00 | APPROVED (random 6-char auth code) |
 | > $500.00 | DECLINED — EXCEEDS LIMIT |
+
+---
+
+## Connecting to a Real NCR ATM Host
+
+Follow these steps to switch the simulator from the built-in simulation to a live NCR ATM host.
+
+### Step 1 — Update `application.properties`
+
+```properties
+# Switch to real host
+atm.host.simulated=false
+
+# IP address or hostname of the NCR ATM host
+atm.host.address=192.168.1.100
+
+# TCP port the host listens on (commonly 4000 or 17000 for NDC)
+atm.host.port=4000
+
+# 8-digit terminal ID registered with the host/acquirer
+atm.terminal.id=00000001
+
+# 4-digit institution/bank ID assigned by the host
+atm.institution.id=0001
+```
+
+### Step 2 — Open and close the TCP connection
+
+`RealNdcHostGateway` manages the raw TCP socket. Call `openConnection()` before sending any messages and `closeConnection()` when the session is complete. Currently `AtmSimulationService` delegates all messaging through the `AtmHostGateway` interface — wire `openConnection()` / `closeConnection()` into the service around the transaction steps:
+
+```java
+// in AtmSimulationService.processWithdrawal(), before Step 1:
+if (hostGateway instanceof RealNdcHostGateway real) {
+    real.openConnection();
+}
+
+// after Step 5 (card ejected):
+if (hostGateway instanceof RealNdcHostGateway real) {
+    real.closeConnection();
+}
+```
+
+### Step 3 — PIN block encryption (mandatory for production)
+
+In simulation mode the PIN block is sent as clear-text ISO 9564 Format 0. A real NCR host **requires the PIN block to be 3DES-encrypted** under the Terminal Working Key (TWK) before transmission.
+
+What needs to change in `PinBlockUtil.java`:
+
+| Step | Current (simulation) | Required (production) |
+|---|---|---|
+| Build format block | `0 + len + PIN + FFFF…` | same |
+| Build PAN block | `0000 + rightmost 12 PAN digits` | same |
+| XOR blocks | clear-text result | same |
+| Encrypt | **not done** | 3DES-encrypt result under TWK |
+| Send | clear-text PIN block | encrypted PIN block |
+
+The TWK is loaded from the HSM (Hardware Security Module) or injected at terminal key-load time. Add the encryption step in `PinBlockUtil.buildPinBlock()` or in `NdcMessageBuilder.buildTransactionRequest()` once you have the TWK available.
+
+### Step 4 — Verify terminal registration
+
+The NCR host maintains a terminal table. Before the simulator can exchange messages, the `atm.terminal.id` and `atm.institution.id` must be pre-registered on the host side. Contact your host/acquirer team for the values assigned to the test terminal.
+
+### Step 5 — Firewall / network access
+
+Ensure the machine running the simulator can reach the host on the configured port:
+
+```bash
+# Test connectivity (replace IP and port with your values)
+telnet 192.168.1.100 4000
+```
+
+### What changes automatically
+
+When `atm.host.simulated=false`, Spring Boot loads `RealNdcHostGateway` instead of `SimulatedHostGateway` — no code changes needed. The same REST endpoint and NDC message format are used; only the transport layer changes from in-memory to TCP.
+
+| | Simulated (`true`) | Real (`false`) |
+|---|---|---|
+| Transport | In-memory method calls | TCP/IP socket |
+| Authorization | Amount ≤ $500 → approve | Real host decision |
+| PIN block | Clear-text | Must be 3DES-encrypted under TWK |
+| Auth code | Random 6 chars | Issued by host |
+| Terminal registration | Not required | Required on host |
 
 ---
 
