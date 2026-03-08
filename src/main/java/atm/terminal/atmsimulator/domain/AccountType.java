@@ -5,12 +5,17 @@ public enum AccountType {
     SAVINGS,
     CREDIT;
 
-    /** NDC account type code sent in transaction request messages. */
+    /**
+     * NDC account type code sent in transaction request messages.
+     * Two-digit format: first digit = from-account type, second digit = to-account type.
+     * For withdrawals the to-account is always 0 (none).
+     *   1x = Checking, 2x = Savings, 3x = Credit
+     */
     public String ndcCode() {
         return switch (this) {
-            case CHECKING -> "1";
-            case SAVINGS  -> "2";
-            case CREDIT   -> "3";
+            case CHECKING -> "10";
+            case SAVINGS  -> "20";
+            case CREDIT   -> "30";
         };
     }
 }

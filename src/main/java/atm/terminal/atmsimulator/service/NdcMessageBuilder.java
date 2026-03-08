@@ -72,29 +72,41 @@ public class NdcMessageBuilder {
     }
 
     /**
-     * Transaction Request — sent after PIN entry with the encrypted PIN block,
-     * account type, and requested amount.
+     * Transaction Request — sent after PIN entry carrying the PIN block, PAN,
+     * account type, and requested amount to the host.
      *
-     * Transaction code 001 = Withdrawal.
-     * Amount is expressed in cents, zero-padded to 12 digits.
-     * PIN block is ISO 9564 Format 0 (clear-text for simulation).
+     * Sub-class T = Transaction Request (NDC standard).
+     *
+     * Frame layout (all post-header fields separated by GS):
+     * <pre>
+     *   1 FS T FS terminalId FS institutionId
+     *     GS txnCode     — 6 chars: 2-digit op (02=withdrawal) + 4-digit flags (0000)
+     *     GS amount      — 12 digits zero-padded cents (e.g. $100.00 → 000000010000)
+     *     GS accountType — 2 digits: from-account + to-account (e.g. 10 = CHECKING/none)
+     *     GS cardNumber  — PAN
+     *     GS pinBlock    — ISO 9564 Format 0, 16 hex digits
+     * </pre>
+     *
+     * PIN block is clear-text for simulation. In production it must be encrypted
+     * under the Terminal Working Key (TWK) using 3DES before transmission.
      */
     public NdcMessage buildTransactionRequest(String cardNumber, String pin,
                                               BigDecimal amount, AccountType accountType) {
         String pinBlock  = PinBlockUtil.buildPinBlock(pin, cardNumber);
         String amountStr = String.format("%012d", amount.movePointRight(2).longValue());
 
-        String raw = "1" + NdcDelimiter.FS + "E"
+        String raw = "1" + NdcDelimiter.FS + "T"
                 + NdcDelimiter.FS + terminalId
                 + NdcDelimiter.FS + institutionId
-                + NdcDelimiter.FS + "001"                     // transaction code: withdrawal
-                + NdcDelimiter.GS + pinBlock
+                + NdcDelimiter.GS + "020000"              // 02 = withdrawal, 0000 = flags
+                + NdcDelimiter.GS + amountStr
                 + NdcDelimiter.GS + accountType.ndcCode()
-                + NdcDelimiter.GS + amountStr;
+                + NdcDelimiter.GS + cardNumber
+                + NdcDelimiter.GS + pinBlock;
 
         return NdcMessage.builder()
                 .messageClass(NdcMessageClass.UNSOLICITED)
-                .messageSubClass("E")
+                .messageSubClass("T")
                 .direction("TERMINAL->HOST")
                 .rawMessage(raw)
                 .timestamp(Instant.now())
