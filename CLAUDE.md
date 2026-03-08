@@ -36,20 +36,34 @@ netstat -ano | grep ':8080' | awk '{print $5}' | xargs -I{} taskkill //PID {} //
 
 ```
 atm.terminal.atmsimulator
-├── controller/       AtmController           POST /api/atm/withdraw
+├── controller/       AtmController           POST /api/atm/withdraw + 3 scenario endpoints
 ├── model/
-│   ├── request/      AtmRequest              JSON input
-│   └── response/     AtmResponse             JSON output + ndcTrace
-├── domain/           OperationType, AccountType, TerminalState, TransactionResult
+│   ├── request/      AtmRequest, ScenarioRequest
+│   └── response/     AtmResponse, ScenarioResponse, OperationResult
+├── domain/           OperationType, AccountType, TerminalState, TransactionResult, AtmSession
 ├── protocol/         NdcMessage, NdcMessageClass, NdcDelimiter, PinBlockUtil
 └── service/
-    ├── NdcMessageBuilder                     Builds TERMINAL→HOST NDC messages
-    ├── AtmSimulationService                  Orchestrates the 4-step withdrawal flow
+    ├── NdcMessageBuilder                     Builds all TERMINAL→HOST NDC messages
+    ├── AtmSimulationService                  Orchestrates the single withdrawal flow
+    ├── operation/    LoginOperation, BalanceInquiryOperation, TransferOperation,
+    │                 WithdrawOperation, LogoutOperation   ← one class per atomic ATM operation
+    ├── scenario/     BalanceCheckScenario, TransferAndBalanceScenario, FullTransactionScenario
     └── gateway/
         ├── AtmHostGateway                    Interface
         ├── SimulatedHostGateway              In-memory host (atm.host.simulated=true, DEFAULT)
         └── RealNdcHostGateway                TCP to real NCR host (atm.host.simulated=false)
 ```
+
+### Scenario Endpoints
+
+| Endpoint | Scenario | Steps |
+|---|---|---|
+| `POST /api/atm/withdraw` | Single withdrawal (original) | Login→Withdraw |
+| `POST /api/atm/scenario/balance-check` | Scenario 1 | Login→Balance→Logout |
+| `POST /api/atm/scenario/transfer-and-balance` | Scenario 2 | Login→Balance→Transfer→Balance→Logout |
+| `POST /api/atm/scenario/full-transaction` | Scenario 3 | Login→Balance→Transfer→Withdraw→Balance→Logout |
+
+Scenario responses include `operations[]` (per-step result) and `fullNdcTrace[]` (all messages chronologically).
 
 ### NDC Protocol Key Facts
 
@@ -57,8 +71,11 @@ atm.terminal.atmsimulator
 - Always log/display via `NdcMessage.readable()` or `NdcDelimiter.toReadable()` — never raw
 - Transaction request sub-class is **`T`** (not `E`)
 - Account type NDC codes are **2-digit**: CHECKING=`10`, SAVINGS=`20`, CREDIT=`30`
-- Transaction request field order: `txnCode(020000) → amount(12-digit cents) → accountType → PAN → pinBlock`
+- txnCode field: `010000`=balance inquiry, `020000`=withdrawal, `030000`=transfer
+- Transaction request field order: `txnCode → amount(12-digit cents) → accountType → [toAccount] → PAN → pinBlock`
 - PIN block: ISO 9564 Format 0 (clear-text for simulation; 3DES-encrypted under TWK for production)
+- Logout message: UNSOLICITED sub-class `B`, payload `CARD_EJECTED`
+- Simulated balance: $1,000 per card, deducted on each approved withdrawal/transfer (`SimulatedHostGateway.balances`)
 
 ### Host Gateway Switch
 

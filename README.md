@@ -46,6 +46,130 @@ Run a single test class:
 
 ## API
 
+### Multi-Step Scenario Endpoints
+
+Three scenario endpoints simulate complete ATM sessions with separate operation classes (Login, Balance, Transfer, Withdraw, Logout) wired together by scenario services.
+
+Each scenario response contains:
+- `scenario` — scenario name
+- `success` — `true` only if every step succeeded
+- `operations[]` — ordered per-step results (operation name, status, balance, authorizationCode, NDC messages)
+- `fullNdcTrace[]` — every NDC message exchanged during the session in chronological order
+
+**Simulated balance**: every card starts at **$1,000.00**. Each approved transfer or withdrawal deducts from it. Balance is reset when the server restarts.
+
+---
+
+#### POST `/api/atm/scenario/balance-check` — Scenario 1
+
+**Flow**: Login → Balance Inquiry → Logout
+
+**Request**
+```json
+{
+  "cardNumber":  "4111111111111111",
+  "expiryDate":  "2812",
+  "pin":         "1234",
+  "accountType": "CHECKING"
+}
+```
+
+**Response**
+```json
+{
+  "scenario": "BALANCE_CHECK",
+  "success": true,
+  "operations": [
+    { "operation": "LOGIN",   "success": true, "status": "APPROVED", "message": "Card accepted — PIN entry requested" },
+    { "operation": "BALANCE", "success": true, "status": "APPROVED", "balance": 1000.00, "message": "BALANCE RETRIEVED" },
+    { "operation": "LOGOUT",  "success": true, "status": "APPROVED", "message": "Card ejected — session ended" }
+  ],
+  "fullNdcTrace": [ ... ]
+}
+```
+
+---
+
+#### POST `/api/atm/scenario/transfer-and-balance` — Scenario 2
+
+**Flow**: Login → Balance → Transfer → Balance → Logout
+
+**Request**
+```json
+{
+  "cardNumber":       "4111111111111111",
+  "expiryDate":       "2812",
+  "pin":              "1234",
+  "accountType":      "CHECKING",
+  "toAccountNumber":  "9876543210",
+  "transferAmount":   50.00
+}
+```
+
+**Response**
+```json
+{
+  "scenario": "TRANSFER_AND_BALANCE",
+  "success": true,
+  "operations": [
+    { "operation": "LOGIN",    "success": true, "status": "APPROVED" },
+    { "operation": "BALANCE",  "success": true, "balance": 1000.00 },
+    { "operation": "TRANSFER", "success": true, "status": "APPROVED", "authorizationCode": "A1B2C3", "processedAmount": 50.00 },
+    { "operation": "BALANCE",  "success": true, "balance": 950.00 },
+    { "operation": "LOGOUT",   "success": true, "status": "APPROVED" }
+  ],
+  "fullNdcTrace": [ ... ]
+}
+```
+
+---
+
+#### POST `/api/atm/scenario/full-transaction` — Scenario 3
+
+**Flow**: Login → Balance → Transfer → Withdraw → Balance → Logout
+
+**Request**
+```json
+{
+  "cardNumber":       "4111111111111111",
+  "expiryDate":       "2812",
+  "pin":              "1234",
+  "accountType":      "CHECKING",
+  "toAccountNumber":  "9876543210",
+  "transferAmount":   50.00,
+  "withdrawAmount":   100.00
+}
+```
+
+**Response**
+```json
+{
+  "scenario": "FULL_TRANSACTION",
+  "success": true,
+  "operations": [
+    { "operation": "LOGIN",    "success": true, "status": "APPROVED" },
+    { "operation": "BALANCE",  "success": true, "balance": 1000.00 },
+    { "operation": "TRANSFER", "success": true, "status": "APPROVED", "authorizationCode": "D4E5F6", "processedAmount": 50.00 },
+    { "operation": "WITHDRAW", "success": true, "status": "APPROVED", "authorizationCode": "G7H8I9", "processedAmount": 100.00 },
+    { "operation": "BALANCE",  "success": true, "balance": 850.00 },
+    { "operation": "LOGOUT",   "success": true, "status": "APPROVED" }
+  ],
+  "fullNdcTrace": [ ... ]
+}
+```
+
+| ScenarioRequest Field | Required for | Type |
+|---|---|---|
+| `cardNumber` | All scenarios | String |
+| `expiryDate` | All scenarios | String (`YYMM`) |
+| `pin` | All scenarios | String |
+| `accountType` | All scenarios | `CHECKING` \| `SAVINGS` \| `CREDIT` |
+| `toAccountNumber` | Scenarios 2 & 3 | String |
+| `transferAmount` | Scenarios 2 & 3 | Number |
+| `withdrawAmount` | Scenario 3 only | Number |
+
+---
+
 ### POST `/api/atm/withdraw` — Cash Withdrawal
 
 Simulates a complete ATM withdrawal: terminal connect → card insert → PIN entry → host authorization → cash dispense.
@@ -307,15 +431,27 @@ When `atm.host.simulated=false`, Spring Boot loads `RealNdcHostGateway` instead 
 
 ```
 src/main/java/atm/terminal/atmsimulator/
-├── controller/          AtmController              REST entry point
+├── controller/          AtmController              REST entry point (withdraw + 3 scenarios)
 ├── model/
-│   ├── request/         AtmRequest                 JSON input model
-│   └── response/        AtmResponse                JSON output + NDC trace
-├── domain/              OperationType, AccountType, TerminalState, TransactionResult
+│   ├── request/         AtmRequest                 JSON input for /withdraw
+│   │                    ScenarioRequest             JSON input for scenario endpoints
+│   └── response/        AtmResponse                JSON output for /withdraw
+│                        ScenarioResponse            JSON output for scenarios
+│                        OperationResult             Per-step result within a scenario
+├── domain/              OperationType, AccountType, TerminalState
+│                        TransactionResult, AtmSession
 ├── protocol/            NdcMessage, NdcMessageClass, NdcDelimiter, PinBlockUtil
 └── service/
-    ├── NdcMessageBuilder                            Builds outbound NDC messages
-    ├── AtmSimulationService                         Orchestrates the transaction flow
+    ├── NdcMessageBuilder                            Builds all outbound NDC messages
+    ├── AtmSimulationService                         Orchestrates single withdrawal flow
+    ├── operation/        LoginOperation             Card insert + PIN entry command
+    │                     BalanceInquiryOperation    txnCode 010000
+    │                     TransferOperation          txnCode 030000
+    │                     WithdrawOperation          txnCode 020000
+    │                     LogoutOperation            Card ejected notification
+    ├── scenario/         BalanceCheckScenario        Scenario 1
+    │                     TransferAndBalanceScenario  Scenario 2
+    │                     FullTransactionScenario     Scenario 3
     └── gateway/
         ├── AtmHostGateway                           Interface
         ├── SimulatedHostGateway                     In-memory host (default)

@@ -11,14 +11,23 @@ for ATM host teams.
 atm.terminal.atmsimulator
 ├── controller/
 │   └── AtmController              POST /api/atm/withdraw
+│                                  POST /api/atm/scenario/balance-check
+│                                  POST /api/atm/scenario/transfer-and-balance
+│                                  POST /api/atm/scenario/full-transaction
 ├── model/
-│   ├── request/AtmRequest         JSON input (cardNumber, expiryDate, pin, operation, amount, accountType)
-│   └── response/AtmResponse       JSON output (success, status, authCode, dispensedAmount, ndcTrace)
+│   ├── request/
+│   │   ├── AtmRequest             JSON input for /withdraw (cardNumber, expiryDate, pin, operation, amount, accountType)
+│   │   └── ScenarioRequest        JSON input for scenario endpoints (+ toAccountNumber, transferAmount, withdrawAmount)
+│   └── response/
+│       ├── AtmResponse            JSON output for /withdraw (success, status, authCode, dispensedAmount, ndcTrace)
+│       ├── ScenarioResponse       JSON output for scenarios (scenario, success, operations[], fullNdcTrace[])
+│       └── OperationResult        Single step result (operation, success, status, message, balance, authCode, processedAmount, ndcMessages[])
 ├── domain/
 │   ├── OperationType              WITHDRAW | BALANCE_INQUIRY | TRANSFER | DEPOSIT
 │   ├── AccountType                CHECKING(10) | SAVINGS(20) | CREDIT(30)  ← 2-digit NDC codes
 │   ├── TerminalState              IDLE→CARD_READ→PIN_ENTRY→TRANSACTION_PROCESSING→DISPENSING→CARD_EJECTED
-│   └── TransactionResult          approved, authorizationCode, dispensedAmount, hostMessage
+│   ├── TransactionResult          approved, authorizationCode, dispensedAmount, hostMessage, currentBalance
+│   └── AtmSession                 Session carrier: cardNumber, expiryDate, pin, accountType, state, ndcTrace[]
 ├── protocol/
 │   ├── NdcDelimiter               FS=\u001C  GS=\u001D  RS=\u001E  US=\u001F
 │   │                              + toReadable(String) → replaces with <FS> <GS> <RS> <US>
@@ -28,10 +37,25 @@ atm.terminal.atmsimulator
 │   └── PinBlockUtil               ISO 9564 Format 0 clear-text PIN block (XOR format+PAN blocks)
 └── service/
     ├── NdcMessageBuilder          Builds all outbound TERMINAL→HOST NDC messages
-    ├── AtmSimulationService       Orchestrates the 4-step withdrawal flow
+    │                              buildSolicitedReady(), buildCardDataMessage(),
+    │                              buildTransactionRequest(), buildBalanceInquiry(),
+    │                              buildTransferRequest(), buildLogout()
+    ├── AtmSimulationService       Orchestrates the single withdrawal flow (original)
+    ├── operation/                 ← One class per atomic ATM operation; each takes AtmSession
+    │   ├── LoginOperation         Solicited Ready + Card Data (4 NDC messages)
+    │   ├── BalanceInquiryOperation txnCode 010000, zero amount → parseBalanceResponse()
+    │   ├── TransferOperation      txnCode 030000 + toAccountNumber → parseAuthorizationResponse()
+    │   ├── WithdrawOperation      txnCode 020000 + amount → parseAuthorizationResponse()
+    │   └── LogoutOperation        UNSOLICITED sub-class B (CARD_EJECTED)
+    ├── scenario/                  ← One class per scenario; wires operations together
+    │   ├── BalanceCheckScenario         Login → Balance → Logout
+    │   ├── TransferAndBalanceScenario   Login → Balance → Transfer → Balance → Logout
+    │   └── FullTransactionScenario      Login → Balance → Transfer → Withdraw → Balance → Logout
     └── gateway/
-        ├── AtmHostGateway         Interface: connect(), sendCardData(), sendTransaction(), parseAuthorizationResponse()
+        ├── AtmHostGateway         Interface: connect(), sendCardData(), sendTransaction(),
+        │                          sendMessage(), parseAuthorizationResponse(), parseBalanceResponse()
         ├── SimulatedHostGateway   @ConditionalOnProperty(atm.host.simulated=true)  ← DEFAULT
+        │                          ConcurrentHashMap balances ($1,000/card, deducted on approval)
         └── RealNdcHostGateway     @ConditionalOnProperty(atm.host.simulated=false) ← TCP to real host
 ```
 
@@ -46,11 +70,48 @@ atm.terminal.atmsimulator
 | 5 | T→H | UNSOLICITED | **T** | `1<FS>T<FS>terminalId<FS>instId<GS>020000<GS>amount12<GS>acctType<GS>PAN<GS>pinBlock` |
 | 6 | H→T | HOST_DATA | A | `4<FS>PENDING` (sim) / real auth response |
 
-## Transaction Request (msg #5) Field Detail
+## NDC Protocol — Scenario Flows
+
+### Scenario 1: Balance Check (8 messages)
+Login (4) + Balance (2) + Logout (2)
+
+| # | Direction | Sub | Description |
+|---|---|---|---|
+| 1–4 | Login | F/E/8 | Solicited Ready → Ack → Card Data → Enter PIN |
+| 5 | T→H | **T** | `txnCode=010000, amount=000000000000` |
+| 6 | H→T | A | Balance response |
+| 7 | T→H | **B** | `CARD_EJECTED` |
+| 8 | H→T | F | Session-end ack |
+
+### Scenario 2: Transfer then Balance (10 messages)
+Login (4) + Balance (2) + Transfer (2) + Balance (2) + Logout (2)
+
+| # | Sub | Description |
+|---|---|---|
+| 1–4 | F/E/8 | Login |
+| 5–6 | T/A | Balance before |
+| 7–8 | T/A | Transfer `txnCode=030000` + toAccountNumber |
+| 9–10 | T/A | Balance after |
+| 11–12 | B/F | Logout |
+
+### Scenario 3: Full Transaction (12 messages)
+Login (4) + Balance (2) + Transfer (2) + Withdraw (2) + Balance (2) + Logout (2)
+
+| # | Sub | Description |
+|---|---|---|
+| 1–4 | F/E/8 | Login |
+| 5–6 | T/A | Balance before |
+| 7–8 | T/A | Transfer `txnCode=030000` |
+| 9–10 | T/A | Withdraw `txnCode=020000` |
+| 11–12 | T/A | Balance after |
+| 13–14 | B/F | Logout |
+
+## Transaction Request (msg T) Field Detail
 ```
-txnCode    = 020000  (02=withdrawal, 0000=flags)
-amount     = 12-digit zero-padded cents  ($100 → 000000010000)
+txnCode    = 010000 (balance) | 020000 (withdrawal) | 030000 (transfer)
+amount     = 12-digit zero-padded cents  ($100 → 000000010000; balance = 000000000000)
 acctType   = 2-digit (from+to)  CHECKING=10, SAVINGS=20, CREDIT=30
+[toAccount]= destination account number (transfer only)
 PAN        = full card number
 pinBlock   = ISO 9564 Fmt 0: formatBlock XOR panBlock (16 hex chars, clear-text in sim)
 ```
@@ -80,35 +141,52 @@ atm.institution.id=0001           # 4-digit institution ID
 1. Set `atm.host.simulated=false`
 2. Set `atm.host.address` and `atm.host.port`
 3. Confirm `atm.terminal.id` and `atm.institution.id` are registered on the host
-4. Wire `openConnection()` / `closeConnection()` from `RealNdcHostGateway` in `AtmSimulationService`
+4. Wire `openConnection()` / `closeConnection()` from `RealNdcHostGateway` in scenario services
 5. Add 3DES PIN block encryption in `PinBlockUtil` using the Terminal Working Key (TWK)
 
 ## Running & Testing
 ```bash
-./mvnw spring-boot:run            # start server on :8080
-./mvnw test                       # run all tests
+./mvnw spring-boot:run                        # start server on :8080
+./mvnw clean package                          # build JAR
+java -jar target/atmsimulator-0.0.1-SNAPSHOT.jar   # run from JAR
+./mvnw test                                   # run all tests
 
 # Kill port 8080 if already in use (Windows):
 netstat -ano | grep ':8080' | awk '{print $5}' | xargs -I{} taskkill //PID {} //F
 ```
 
-## Postman — Withdraw $100
+## Postman Samples
+
+### Withdraw $100
 ```
 POST http://localhost:8080/api/atm/withdraw
-Content-Type: application/json
-
-{
-  "cardNumber":  "4111111111111111",
-  "expiryDate":  "2812",
-  "pin":         "1234",
-  "operation":   "WITHDRAW",
-  "amount":      100.00,
-  "accountType": "CHECKING"
-}
+{ "cardNumber":"4111111111111111","expiryDate":"2812","pin":"1234","operation":"WITHDRAW","amount":100.00,"accountType":"CHECKING" }
 ```
-Amounts ≤ $500 → APPROVED.  Amounts > $500 → DECLINED (simulated host rule).
+
+### Scenario 1 — Balance Check
+```
+POST http://localhost:8080/api/atm/scenario/balance-check
+{ "cardNumber":"4111111111111111","expiryDate":"2812","pin":"1234","accountType":"CHECKING" }
+```
+
+### Scenario 2 — Transfer then Balance
+```
+POST http://localhost:8080/api/atm/scenario/transfer-and-balance
+{ "cardNumber":"4111111111111111","expiryDate":"2812","pin":"1234","accountType":"CHECKING",
+  "toAccountNumber":"9876543210","transferAmount":50.00 }
+```
+
+### Scenario 3 — Full Transaction
+```
+POST http://localhost:8080/api/atm/scenario/full-transaction
+{ "cardNumber":"4111111111111111","expiryDate":"2812","pin":"1234","accountType":"CHECKING",
+  "toAccountNumber":"9876543210","transferAmount":50.00,"withdrawAmount":100.00 }
+```
+Simulated balance starts at $1,000 per card. Each approved transfer/withdrawal deducts from it.
+Amounts ≤ $500 → APPROVED. Amounts > $500 → DECLINED.
 
 ## GitHub Commits (latest first)
+- `e37e48d` — Add multi-step scenario framework with per-operation classes
 - `ae159d7` — README: real host connection guide + NDC trace fix
 - `edd3c50` — Fix transaction request: sub-class T, field order, 2-digit account type
 - `8da8862` — README: build/run/test/API docs
