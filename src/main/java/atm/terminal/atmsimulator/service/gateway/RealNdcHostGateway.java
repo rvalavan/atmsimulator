@@ -77,9 +77,43 @@ public class RealNdcHostGateway implements AtmHostGateway {
     }
 
     @Override
+    public NdcMessage sendMessage(NdcMessage message) {
+        return sendAndReceive(message);
+    }
+
+    @Override
+    public TransactionResult parseBalanceResponse(NdcMessage hostResponse, String cardNumber) {
+        String raw = hostResponse.getRawMessage();
+        if (raw == null || raw.isEmpty()) {
+            return TransactionResult.builder()
+                    .approved(false)
+                    .hostMessage("NO RESPONSE FROM HOST")
+                    .build();
+        }
+        // NDC balance response: class 4, balance amount in the last field
+        String[] parts = raw.split(String.valueOf('\u001C'));
+        BigDecimal balance = BigDecimal.ZERO;
+        if (parts.length > 1) {
+            try {
+                // Host returns balance as 12-digit cents; convert to dollars
+                String balanceField = parts[parts.length - 1].trim();
+                balance = new BigDecimal(balanceField).movePointLeft(2);
+            } catch (NumberFormatException ignored) {
+                // leave as zero if unparseable
+            }
+        }
+        return TransactionResult.builder()
+                .approved(true)
+                .hostMessage("BALANCE RETRIEVED")
+                .currentBalance(balance)
+                .build();
+    }
+
+    @Override
     public TransactionResult parseAuthorizationResponse(NdcMessage hostResponse,
                                                         BigDecimal requestedAmount,
-                                                        AccountType accountType) {
+                                                        AccountType accountType,
+                                                        String cardNumber) {
         String raw = hostResponse.getRawMessage();
         if (raw == null || raw.isEmpty()) {
             return TransactionResult.builder()

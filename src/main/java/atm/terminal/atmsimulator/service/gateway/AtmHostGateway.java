@@ -31,15 +31,34 @@ public interface AtmHostGateway {
     NdcMessage sendCardData(NdcMessage cardDataMessage);
 
     /**
-     * Sends the transaction request (PIN block + amount) to the host
-     * and returns the authorization response message.
+     * Sends a transaction request (balance inquiry, transfer, or withdrawal)
+     * and returns the host authorization response message.
      */
     NdcMessage sendTransaction(NdcMessage transactionMessage);
 
     /**
-     * Parses the host authorization response into a structured result.
+     * Generic send — used for logout / card-ejected notifications and
+     * any message that does not fit the more specific methods above.
+     */
+    NdcMessage sendMessage(NdcMessage message);
+
+    /**
+     * Parses the host authorization response (for withdrawal and transfer) into
+     * a structured result. On approval, deducts the amount from the cardholder's
+     * simulated balance (simulation mode only).
+     *
+     * @param cardNumber used by the simulated gateway for balance tracking
      */
     TransactionResult parseAuthorizationResponse(NdcMessage hostResponse,
                                                  BigDecimal requestedAmount,
-                                                 AccountType accountType);
+                                                 AccountType accountType,
+                                                 String cardNumber);
+
+    /**
+     * Parses the host response to a balance inquiry and returns the current balance
+     * in {@link TransactionResult#getCurrentBalance()}.
+     *
+     * @param cardNumber used by the simulated gateway to look up the in-memory balance
+     */
+    TransactionResult parseBalanceResponse(NdcMessage hostResponse, String cardNumber);
 }

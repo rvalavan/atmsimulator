@@ -112,4 +112,98 @@ public class NdcMessageBuilder {
                 .timestamp(Instant.now())
                 .build();
     }
+
+    /**
+     * Balance Inquiry Request — txnCode 01, zero amount.
+     *
+     * <pre>
+     *   1 FS T FS terminalId FS institutionId
+     *     GS 010000            — 01 = balance inquiry
+     *     GS 000000000000      — zero amount
+     *     GS accountType
+     *     GS cardNumber
+     *     GS pinBlock
+     * </pre>
+     */
+    public NdcMessage buildBalanceInquiry(String cardNumber, String pin, AccountType accountType) {
+        String pinBlock = PinBlockUtil.buildPinBlock(pin, cardNumber);
+
+        String raw = "1" + NdcDelimiter.FS + "T"
+                + NdcDelimiter.FS + terminalId
+                + NdcDelimiter.FS + institutionId
+                + NdcDelimiter.GS + "010000"              // 01 = balance inquiry
+                + NdcDelimiter.GS + "000000000000"        // zero amount
+                + NdcDelimiter.GS + accountType.ndcCode()
+                + NdcDelimiter.GS + cardNumber
+                + NdcDelimiter.GS + pinBlock;
+
+        return NdcMessage.builder()
+                .messageClass(NdcMessageClass.UNSOLICITED)
+                .messageSubClass("T")
+                .direction("TERMINAL->HOST")
+                .rawMessage(raw)
+                .timestamp(Instant.now())
+                .build();
+    }
+
+    /**
+     * Fund Transfer Request — txnCode 03, includes destination account number.
+     *
+     * <pre>
+     *   1 FS T FS terminalId FS institutionId
+     *     GS 030000            — 03 = transfer
+     *     GS amount12
+     *     GS accountType
+     *     GS toAccountNumber
+     *     GS cardNumber
+     *     GS pinBlock
+     * </pre>
+     */
+    public NdcMessage buildTransferRequest(String cardNumber, String pin,
+                                           BigDecimal amount, AccountType accountType,
+                                           String toAccountNumber) {
+        String pinBlock  = PinBlockUtil.buildPinBlock(pin, cardNumber);
+        String amountStr = String.format("%012d", amount.movePointRight(2).longValue());
+
+        String raw = "1" + NdcDelimiter.FS + "T"
+                + NdcDelimiter.FS + terminalId
+                + NdcDelimiter.FS + institutionId
+                + NdcDelimiter.GS + "030000"              // 03 = transfer
+                + NdcDelimiter.GS + amountStr
+                + NdcDelimiter.GS + accountType.ndcCode()
+                + NdcDelimiter.GS + toAccountNumber
+                + NdcDelimiter.GS + cardNumber
+                + NdcDelimiter.GS + pinBlock;
+
+        return NdcMessage.builder()
+                .messageClass(NdcMessageClass.UNSOLICITED)
+                .messageSubClass("T")
+                .direction("TERMINAL->HOST")
+                .rawMessage(raw)
+                .timestamp(Instant.now())
+                .build();
+    }
+
+    /**
+     * Logout / card-ejected notification — signals end of session.
+     * The terminal returns to idle and notifies the host with UNSOLICITED sub-class 'B'.
+     *
+     * <pre>
+     *   1 FS B FS terminalId FS institutionId GS CARD_EJECTED
+     * </pre>
+     */
+    public NdcMessage buildLogout() {
+        String raw = "1" + NdcDelimiter.FS + "B"
+                + NdcDelimiter.FS + terminalId
+                + NdcDelimiter.FS + institutionId
+                + NdcDelimiter.GS + "CARD_EJECTED";
+
+        return NdcMessage.builder()
+                .messageClass(NdcMessageClass.UNSOLICITED)
+                .messageSubClass("B")
+                .direction("TERMINAL->HOST")
+                .rawMessage(raw)
+                .timestamp(Instant.now())
+                .build();
+    }
 }

@@ -79,7 +79,7 @@ public class AtmSimulationService {
             trace.add(authResponse);
 
             TransactionResult result = hostGateway.parseAuthorizationResponse(
-                    authResponse, request.getAmount(), request.getAccountType());
+                    authResponse, request.getAmount(), request.getAccountType(), request.getCardNumber());
 
             // ── Step 5: Dispense cash / eject card ───────────────────────────────
             if (result.isApproved()) {
