@@ -17,12 +17,35 @@ A Spring Boot application that simulates an NCR ATM terminal communicating with 
 ./mvnw clean package
 ```
 
+This produces a self-contained JAR at:
+
+```
+target/atmsimulator-0.0.1-SNAPSHOT.jar
+```
+
 ---
 
 ## Run
 
+### Option 1 — Maven (development)
+
 ```bash
 ./mvnw spring-boot:run
+```
+
+### Option 2 — JAR (production / deployment)
+
+```bash
+java -jar target/atmsimulator-0.0.1-SNAPSHOT.jar
+```
+
+### Option 3 — JAR with real NCR host
+
+```bash
+java -jar target/atmsimulator-0.0.1-SNAPSHOT.jar \
+  --atm.host.simulated=false \
+  --atm.host.address=192.168.1.100 \
+  --atm.host.port=4000
 ```
 
 The server starts on **http://localhost:8080**.

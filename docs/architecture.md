@@ -83,7 +83,7 @@ Login (4) + Balance (2) + Logout (2)
 | 7 | T→H | **B** | `CARD_EJECTED` |
 | 8 | H→T | F | Session-end ack |
 
-### Scenario 2: Transfer then Balance (10 messages)
+### Scenario 2: Transfer then Balance (12 messages)
 Login (4) + Balance (2) + Transfer (2) + Balance (2) + Logout (2)
 
 | # | Sub | Description |
@@ -94,7 +94,7 @@ Login (4) + Balance (2) + Transfer (2) + Balance (2) + Logout (2)
 | 9–10 | T/A | Balance after |
 | 11–12 | B/F | Logout |
 
-### Scenario 3: Full Transaction (12 messages)
+### Scenario 3: Full Transaction (14 messages)
 Login (4) + Balance (2) + Transfer (2) + Withdraw (2) + Balance (2) + Logout (2)
 
 | # | Sub | Description |
@@ -105,6 +105,98 @@ Login (4) + Balance (2) + Transfer (2) + Withdraw (2) + Balance (2) + Logout (2)
 | 9–10 | T/A | Withdraw `txnCode=020000` |
 | 11–12 | T/A | Balance after |
 | 13–14 | B/F | Logout |
+
+---
+
+## Sequence Diagrams
+
+### Scenario 1 — Balance Check
+
+```
+Client          AtmController    BalanceCheckScenario    LoginOperation       Host
+  |                  |                   |                    |                 |
+  |--POST /scenario/balance-check------->|                    |                 |
+  |                  |--execute(req)---->|                    |                 |
+  |                  |                  |--loginOp.execute()->|                 |
+  |                  |                  |                    |--SolicitedReady->|
+  |                  |                  |                    |<---Ack(F)--------|
+  |                  |                  |                    |--CardData(E)---->|
+  |                  |                  |                    |<---EnterPIN(8)---|
+  |                  |                  |<--OperationResult(LOGIN, 4 msgs)------|
+  |                  |                  |                    |                 |
+  |                  |           BalanceInquiryOperation     |                 |
+  |                  |                  |--balanceOp.execute()---------------->|
+  |                  |                  |        |--BalanceInquiry(T,010000)--->|
+  |                  |                  |        |<---BalanceResponse(A)--------|
+  |                  |                  |<--OperationResult(BALANCE, balance $) |
+  |                  |                  |                    |                 |
+  |                  |             LogoutOperation           |                 |
+  |                  |                  |--logoutOp.execute()----------------->|
+  |                  |                  |        |--Logout(B,CARD_EJECTED)----->|
+  |                  |                  |        |<---Ack(F)--------------------|
+  |                  |                  |<--OperationResult(LOGOUT, 2 msgs)----|
+  |                  |                  |                    |                 |
+  |                  |<--ScenarioResponse(BALANCE_CHECK, 3 ops, 8 msgs)--------|
+  |<--HTTP 200 / ScenarioResponse--------|                   |                 |
+```
+
+### Scenario 2 — Transfer and Balance
+
+```
+Client          AtmController  TransferAndBalanceScenario                     Host
+  |                  |                   |                                      |
+  |--POST /scenario/transfer-and-balance->                                      |
+  |                  |--execute(req)---->|                                      |
+  |                  |                  |-- LoginOperation (4 msgs) ----------->|
+  |                  |                  |<- OperationResult(LOGIN) -------------|
+  |                  |                  |                                       |
+  |                  |                  |-- BalanceInquiryOperation (2 msgs) -->|
+  |                  |                  |<- OperationResult(BALANCE, $1000) ----|
+  |                  |                  |                                       |
+  |                  |                  |-- TransferOperation ----------------->|
+  |                  |                  |   txnCode=030000, toAccount, amount   |
+  |                  |                  |<- OperationResult(TRANSFER, APPROVED)-|
+  |                  |                  |                                       |
+  |                  |                  |-- BalanceInquiryOperation (2 msgs) -->|
+  |                  |                  |<- OperationResult(BALANCE, $950) -----|
+  |                  |                  |                                       |
+  |                  |                  |-- LogoutOperation (2 msgs) ---------->|
+  |                  |                  |<- OperationResult(LOGOUT) ------------|
+  |                  |                  |                                       |
+  |                  |<--ScenarioResponse(TRANSFER_AND_BALANCE, 5 ops, 12 msgs)-|
+  |<--HTTP 200 / ScenarioResponse--------|                                      |
+```
+
+### Scenario 3 — Full Transaction
+
+```
+Client          AtmController   FullTransactionScenario                       Host
+  |                  |                   |                                      |
+  |--POST /scenario/full-transaction----->                                      |
+  |                  |--execute(req)---->|                                      |
+  |                  |                  |-- LoginOperation (4 msgs) ----------->|
+  |                  |                  |<- OperationResult(LOGIN) -------------|
+  |                  |                  |                                       |
+  |                  |                  |-- BalanceInquiryOperation (2 msgs) -->|
+  |                  |                  |<- OperationResult(BALANCE, $1000) ----|
+  |                  |                  |                                       |
+  |                  |                  |-- TransferOperation ----------------->|
+  |                  |                  |   txnCode=030000, toAccount, amount   |
+  |                  |                  |<- OperationResult(TRANSFER, APPROVED)-|
+  |                  |                  |                                       |
+  |                  |                  |-- WithdrawOperation ----------------->|
+  |                  |                  |   txnCode=020000, amount              |
+  |                  |                  |<- OperationResult(WITHDRAW, APPROVED)-|
+  |                  |                  |                                       |
+  |                  |                  |-- BalanceInquiryOperation (2 msgs) -->|
+  |                  |                  |<- OperationResult(BALANCE, $850) -----|
+  |                  |                  |                                       |
+  |                  |                  |-- LogoutOperation (2 msgs) ---------->|
+  |                  |                  |<- OperationResult(LOGOUT) ------------|
+  |                  |                  |                                       |
+  |                  |<--ScenarioResponse(FULL_TRANSACTION, 6 ops, 14 msgs) ----|
+  |<--HTTP 200 / ScenarioResponse--------|                                      |
+```
 
 ## Transaction Request (msg T) Field Detail
 ```
