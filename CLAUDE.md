@@ -2,9 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> For full project context, decisions, and NDC protocol detail see:
+> - [docs/MEMORY.md](docs/MEMORY.md) — status, key decisions, next TODOs
+> - [docs/architecture.md](docs/architecture.md) — package map, NDC message flows, PIN block, Postman samples
+
 ## Project Overview
 
-NCR ATM Simulator — a Spring Boot 4.1.0-SNAPSHOT application (Java 21, Maven, Lombok) that simulates an NCR ATM terminal. It connects to an NCR ATM host over TCP/IP using the **NDC (NCR Direct Connect)** protocol to simulate real user operations: card authentication, PIN entry, balance inquiry, cash withdrawal, and transfers. The primary use case is as a **testing tool** against a live or mock NCR host.
+NCR ATM Simulator — a Spring Boot 4.1.0-SNAPSHOT application (Java 21, Maven, Lombok) that simulates an NCR ATM terminal communicating with an NCR ATM host over TCP/IP using the **NDC (NCR Direct Connect)** protocol. Used as a **testing tool** to drive real card authentication, PIN entry, cash withdrawal, and transfer flows against a live or simulated host.
 
 ## Commands
 
@@ -12,75 +16,70 @@ NCR ATM Simulator — a Spring Boot 4.1.0-SNAPSHOT application (Java 21, Maven, 
 # Build
 ./mvnw clean package
 
-# Run the application
+# Run (default port 8080, simulated host)
 ./mvnw spring-boot:run
 
 # Run all tests
 ./mvnw test
 
-# Run a single test class
+# Single test class / method
 ./mvnw test -Dtest=SomeTestClass
-
-# Run a single test method
 ./mvnw test -Dtest=SomeTestClass#methodName
+
+# Kill port 8080 if already in use (Windows)
+netstat -ano | grep ':8080' | awk '{print $5}' | xargs -I{} taskkill //PID {} //F
 ```
 
 ## Architecture
 
-### NDC Protocol
-
-NCR ATMs communicate with the host using the **NDC (Network Data Communication)** protocol:
-- Messages are ASCII-based, field-separated by specific delimiters (FS = `\x1C`, GS = `\x1D`, RS = `\x1E`, US = `\x1F`)
-- Two message directions: **Terminal → Host** (unsolicited/solicited requests) and **Host → Terminal** (command/data responses)
-- Key message classes: `Solicited` (terminal status/ready), `Unsolicited` (card data, transaction data), and `Host Command` (screen/state instructions)
-- The terminal operates as a **state machine**; the host sends state transitions and screen definitions
-
-### Transaction Flow
+### Implemented Package Structure
 
 ```
-Terminal connects → sends Terminal State → Host responds with config
-→ Card inserted → Terminal sends Card Data (Track 1/2/3)
-→ Host sends PIN entry command → Terminal encrypts PIN (EPP/HSM)
-→ Terminal sends transaction request (amount, account type)
-→ Host responds with Authorized / Declined / Fault
-→ Terminal dispenses cash / prints receipt
+atm.terminal.atmsimulator
+├── controller/       AtmController           POST /api/atm/withdraw
+├── model/
+│   ├── request/      AtmRequest              JSON input
+│   └── response/     AtmResponse             JSON output + ndcTrace
+├── domain/           OperationType, AccountType, TerminalState, TransactionResult
+├── protocol/         NdcMessage, NdcMessageClass, NdcDelimiter, PinBlockUtil
+└── service/
+    ├── NdcMessageBuilder                     Builds TERMINAL→HOST NDC messages
+    ├── AtmSimulationService                  Orchestrates the 4-step withdrawal flow
+    └── gateway/
+        ├── AtmHostGateway                    Interface
+        ├── SimulatedHostGateway              In-memory host (atm.host.simulated=true, DEFAULT)
+        └── RealNdcHostGateway                TCP to real NCR host (atm.host.simulated=false)
 ```
 
-### Key Components to Build
+### NDC Protocol Key Facts
 
-| Package | Responsibility |
-|---|---|
-| `connection` | TCP socket client that maintains persistent connection to NCR host |
-| `protocol.ndc` | NDC message parser/builder (field encoding, delimiters, message classes) |
-| `terminal` | State machine representing ATM terminal states |
-| `crypto` | PIN block encryption (ISO 9564 Format 0/1/3), HSM simulation |
-| `simulation` | Orchestrates user-operation scenarios (withdraw, balance, transfer) |
-| `api` | REST endpoints to trigger simulation scenarios (Spring MVC controllers) |
+- Delimiters: `FS=\u001C  GS=\u001D  RS=\u001E  US=\u001F`
+- Always log/display via `NdcMessage.readable()` or `NdcDelimiter.toReadable()` — never raw
+- Transaction request sub-class is **`T`** (not `E`)
+- Account type NDC codes are **2-digit**: CHECKING=`10`, SAVINGS=`20`, CREDIT=`30`
+- Transaction request field order: `txnCode(020000) → amount(12-digit cents) → accountType → PAN → pinBlock`
+- PIN block: ISO 9564 Format 0 (clear-text for simulation; 3DES-encrypted under TWK for production)
 
-### Protocol Notes
+### Host Gateway Switch
 
-- **Connection**: persistent TCP socket; the terminal sends a `Ready` solicited message on connect and heartbeats periodically
-- **PIN Encryption**: PIN blocks must be formatted per ISO 9564 (typically Format 0 XOR'd with PAN) before sending; use a test/dummy key in simulation
-- **Card Data**: Track 2 is the minimum required (`; PAN = EXPIRY = SERVICE_CODE ?`)
-- **Message Lrc**: NDC messages include an LRC (Longitudinal Redundancy Check) byte at the end
-- **Terminal ID / Institution ID**: configured per host environment in `application.properties`
+| `atm.host.simulated` | Bean loaded | Behaviour |
+|---|---|---|
+| `true` (default) | `SimulatedHostGateway` | In-memory; ≤$500 approved, >$500 declined |
+| `false` | `RealNdcHostGateway` | TCP socket to `atm.host.address:atm.host.port` |
 
 ### Configuration (`application.properties`)
 
 ```properties
-spring.application.name=ATM Simulator
-# NCR Host connection
-atm.host.address=<host-ip>
-atm.host.port=<port>
-atm.terminal.id=<terminal-id>
-atm.institution.id=<institution-id>
+atm.host.simulated=true       # toggle host mode
+atm.host.address=localhost
+atm.host.port=4000
+atm.terminal.id=00000001      # 8-digit, must be registered with acquirer for real host
+atm.institution.id=0001       # 4-digit
 ```
 
 ## Framework & Stack
 
 - **Framework**: Spring Boot WebMVC (servlet stack), not reactive
 - **Base package**: `atm.terminal.atmsimulator`
-- **Source root**: `src/main/java/atm/terminal/atmsimulator/`
-- **Test root**: `src/test/java/atm/terminal/atmsimulator/`
-- **Lombok**: used for boilerplate; annotation processing configured in `pom.xml`
-- **Spring Boot version**: 4.1.0-SNAPSHOT — uses Spring snapshot repository (`https://repo.spring.io/snapshot`)
+- **Lombok**: annotation processing configured in `pom.xml`
+- **Spring Boot**: 4.1.0-SNAPSHOT — uses `https://repo.spring.io/snapshot`
